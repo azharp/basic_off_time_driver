@@ -173,6 +173,17 @@ static void inline strobe()
     }
 }
 
+// add beacon mode of 20ms on, 3000ms off
+static void inline beacon()
+{
+    while (1){
+        PORTB |= _BV(STROBE_PIN); // on
+        _delay_ms(20);
+        PORTB &= ~_BV(STROBE_PIN); // off
+        _delay_ms(3000);
+    }
+}
+
 static void inline sleep_ms(uint16_t ms)
 {
     while(ms >= 1){
@@ -244,7 +255,7 @@ int main(void)
     {
         switch(noinit_strobe_mode){
             case 0:
-            strobe();
+            beacon();
             break;
         }
     }
@@ -257,16 +268,16 @@ int main(void)
 
     switch(noinit_mode){
         case 0:
-        PWM_LVL = 0xFF;
+        PWM_LVL = 0x04;
         break;
         case 1:
-        PWM_LVL = 0x40;
+        PWM_LVL = 0xE;
         break;
         case 2:
-        PWM_LVL = 0x10;
+        PWM_LVL = 0x64;
         break;
         case 3:
-        PWM_LVL = 0x04;
+        PWM_LVL = 0xFF;
         break;
         case 4:
         #ifdef MODE_MEMORY // remember mode in eeprom
