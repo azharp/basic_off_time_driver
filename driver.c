@@ -66,9 +66,6 @@ uint8_t EEMEM LVL_P;
 // decay used to tell if user did a short press.
 volatile uint8_t noinit_decay __attribute__ ((section (".noinit")));
 volatile uint8_t noinit_mode __attribute__ ((section (".noinit")));
-// pwm level selected by ramping function
-volatile uint8_t noinit_lvl __attribute__ ((section (".noinit")));
-// number of times light was on for a short period, used to enter
 // extended modes
 volatile uint8_t noinit_short __attribute__ ((section (".noinit")));
 // extended mode enable, 0 if in regular mode group
@@ -84,82 +81,6 @@ volatile uint8_t noinit_strobe_mode __attribute__ ((section (".noinit")));
 
 // This will be the same as the PWM_PIN on a stock driver
 #define STROBE_PIN PB1
-
-/* Ramping configuration.
- * Configure the LUT used for the ramping function and the delay between
- * steps of the ramp.
- */
-
-// delay in ms between each ramp step
-#define RAMP_DELAY 30
-
-#define SINUSOID 4, 4, 5, 6, 8, 10, 13, 16, 20, 24, 28, 33, 39, 44, 50, 57, 63, 70, 77, 85, 92, 100, 108, 116, 124, 131, 139, 147, 155, 163, 171, 178, 185, 192, 199, 206, 212, 218, 223, 228, 233, 237, 241, 244, 247, 250, 252, 253, 254, 255
-// natural log of a sinusoid
-#define LN_SINUSOID 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 7, 7, 8, 8, 9, 10, 11, 12, 14, 16, 18, 21, 24, 27, 32, 37, 43, 50, 58, 67, 77, 88, 101, 114, 128, 143, 158, 174, 189, 203, 216, 228, 239, 246, 252, 255
-// perceived intensity is basically linearly increasing
-#define SQUARED 4, 4, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 21, 24, 27, 30, 33, 37, 40, 44, 48, 53, 57, 62, 67, 72, 77, 83, 88, 94, 100, 107, 113, 120, 127, 134, 141, 149, 157, 165, 173, 181, 190, 198, 207, 216, 226, 235, 245, 255
-// smooth sinusoidal ramping
-#define SIN_SQUARED_4 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 7, 7, 8, 9, 10, 10, 11, 13, 14, 15, 16, 18, 20, 21, 23, 25, 28, 30, 32, 35, 38, 41, 44, 47, 50, 54, 57, 61, 65, 69, 73, 77, 81, 86, 90, 95, 100, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 156, 161, 166, 171, 176, 181, 186, 190, 195, 200, 204, 209, 213, 217, 221, 224, 228, 231, 234, 237, 240, 243, 245, 247, 249, 250, 252, 253, 254, 254, 255, 255
-// smooth sinusoidal ramping
-#define SIN_SQUARED 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 8, 8, 9, 10, 11, 11, 12, 14, 15, 16, 17, 19, 21, 22, 24, 26, 29, 31, 33, 36, 39, 42, 45, 48, 51, 54, 58, 62, 66, 69, 74, 78, 82, 87, 91, 96, 100, 105, 110, 115, 120, 125, 130, 135, 140, 146, 151, 156, 161, 166, 171, 176, 181, 186, 191, 195, 200, 204, 209, 213, 217, 221, 224, 228, 231, 234, 237, 240, 243, 245, 247, 249, 251, 252, 253, 254, 254, 255, 255
-
-// select which ramping profile to use.
-// store in program memory. It would use too much SRAM.
-uint8_t const ramp_LUT[] PROGMEM = { SIN_SQUARED };
-
-
-/* Rise-Fall Ramping brightness selection /\/\/\/\
- * cycle through PWM values from ramp_LUT (look up table). Traverse LUT
- * forwards, then backwards. Current PWM value is saved in noinit_lvl so
- * it is available at next startup (after a short press).
-*/
-void ramp()
-{
-    uint8_t i = 0;
-    while (1){
-        for (i = 0; i < sizeof(ramp_LUT); i++){
-            PWM_LVL = pgm_read_byte(&(ramp_LUT[i]));
-            noinit_lvl = PWM_LVL; // remember after short power off
-            _delay_ms(RAMP_DELAY); //gives a period of x seconds
-        }
-        for (i = sizeof(ramp_LUT) - 1; i > 0; i--){
-            PWM_LVL = pgm_read_byte(&(ramp_LUT[i]));
-            noinit_lvl = PWM_LVL; // remember after short power off
-            _delay_ms(RAMP_DELAY); //gives a period of x seconds
-        }
-
-    }
-}
-
-/* Rising Ramping brightness selection //////
- * Cycle through PWM values from ramp_LUT (look up table). Current PWM
- * value is saved in noinit_lvl so it is available at next startup
- * (after a short press)
-*/
-void ramp2()
-{
-    uint8_t i = 0;
-    while (1){
-        for (i = 0; i < sizeof(ramp_LUT); i++){
-            PWM_LVL = pgm_read_byte(&(ramp_LUT[i]));
-            noinit_lvl = PWM_LVL; // remember after short power off
-            _delay_ms(RAMP_DELAY); //gives a period of x seconds
-        }
-
-        //_delay_ms(1000);
-    }
-}
-
-// strobe just by changing pwm, can use this with normal pwm pin setup
-static void inline pwm_strobe()
-{
-    while (1){
-        PWM_LVL = 255;
-        _delay_ms(20);
-        PWM_LVL = 0;
-        _delay_ms(90);
-    }
-}
 
 // strobe using the STROBE_PIN. Note that PWM on that pin should not be
 // set up, or it should be disabled before calling this function.
@@ -213,11 +134,9 @@ int main(void)
         noinit_short = 0; // reset short counter
         noinit_strobe = 0;
         noinit_strobe_mode = 0;
-        noinit_lvl = 0;
 
         #ifdef  MODE_MEMORY // get mode from eeprom
         noinit_mode =  eeprom_read_byte(&MODE_P);
-		noinit_lvl = eeprom_read_byte(&LVL_P);
         #endif
     }
     else
@@ -230,7 +149,7 @@ int main(void)
 
     // mode needs to loop back around
     // (or the mode is invalid)
-    if (noinit_mode > 5) // there are 6 modes
+    if (noinit_mode > 3) // there are 4 modes
     {
         noinit_mode = 0;
     }
@@ -279,17 +198,6 @@ int main(void)
         case 3:
         PWM_LVL = 0xFF;
         break;
-        case 4:
-        #ifdef MODE_MEMORY // remember mode in eeprom
-        // save mode without delay, since ramp() will not return.
-	    eeprom_busy_wait(); //make sure eeprom is ready
-	    eeprom_write_byte(&MODE_P, noinit_mode); // save mode
-	    #endif
-        ramp(); // ramping brightness selection
-        break;
-        case 5:
-        PWM_LVL = noinit_lvl; // use value selected by ramping function
-        break;
     }
 
     // keep track of the number of very short on times
@@ -300,13 +208,6 @@ int main(void)
     #ifdef MODE_MEMORY // remember mode in eeprom
     eeprom_busy_wait(); //make sure eeprom is ready
     eeprom_write_byte(&MODE_P, noinit_mode); // save mode
-    // only save level if it was set, to reduce writes. Not based on 
-    // mode number in case mode orders change in code.
-    if (noinit_lvl != 0)
-    {
-		eeprom_busy_wait(); //make sure eeprom is ready
-	    eeprom_write_byte(&LVL_P, noinit_lvl); // save level
-	}
     #endif
     while(1);
     return 0;
