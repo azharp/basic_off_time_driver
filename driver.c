@@ -1,4 +1,42 @@
 /*
+	mk2_FW_mod 20150608 - based on source code listed below
+
+	FEATURES
+
+	- off-time functions without hardware modification
+	- low-voltage monitor; 4 sec low light warning and shutdown at 2.9V
+	- battery check mode
+	- 7 modes + hidden strobe: moon, low, med, max, batt, beacon (10/1000ms), ramp
+	- memory is disabled because it is less relevant in off-time operation
+
+	NOTES
+
+	Battery check mode blinks:
+	- 0 blinks: < 3.0V
+	- 1 blink: 3.0 - 3.3V
+	- 2 blinks: 3.3 - 3.6V
+	- 3 blinks: 3.6 - 3.9V
+	- 4 blinks: 3.9 - 4.2V
+	- 5 blinks: > 4.2V
+
+	AK47A test
+	0x03	2mA
+	0x05	7mA
+	0x06	9mA
+	0x08	13mA
+	0x10	50mA
+	0x40	240mA
+	0xFF	1A
+	strobe2(10, 1000); // ~10mA
+
+    _delay_ms(25); // on for too long ; noinit_short = 0; // reset short press counter
+	was moved before the switch to improve mode detection
+
+	flash: avrdude -p t13 -c usbasp -u -U flash:w:code.hex:a -U lfuse:w:0x79:m -U hfuse:w:0xed:m
+*/
+
+
+/*
  * "Off Time Basic Driver" for ATtiny controlled flashlights
  *  Copyright (C) 2014 Alex van Heuvelen (alexvanh)
  *
@@ -47,14 +85,66 @@
  * capacitor voltage drops below the threshold?
  */
 
+
+
+/*
+ * Original author: JonnyC
+ * Modifications: ToyKeeper / Selene Scriven
+ *
+ * NANJG 105C Diagram
+ *           ---
+ *         -|   |- VCC
+ *  Star 4 -|   |- Voltage ADC
+ *  Star 3 -|   |- PWM
+ *     GND -|   |- Star 2
+ *           ---
+ *
+ * CPU speed is 4.8Mhz without the 8x divider when low fuse is 0x79
+ *
+ * define F_CPU 4800000  CPU: 4.8MHz  PWM: 9.4kHz       ####### use low fuse: 0x79  #######
+ * 
+ * Above PWM speeds are for phase-correct PWM.  This program uses Fast-PWM,
+ * which when the CPU is 4.8MHz will be 18.75 kHz
+ *
+ * VOLTAGE
+ *      Resistor values for voltage divider (reference BLF-VLD README for more info)
+ *      Reference voltage can be anywhere from 1.0 to 1.2, so this cannot be all that accurate
+ *
+ *           VCC
+ *            |
+ *           Vd (~.25 v drop from protection diode)
+ *            |
+ *          1912 (R1 19,100 ohms)
+ *            |
+ *            |---- PB2 from MCU
+ *            |
+ *          4701 (R2 4,700 ohms)
+ *            |
+ *           GND
+ *
+ *      ADC = ((V_bat - V_diode) * R2   * 255) / ((R1    + R2  ) * V_ref)
+ *      125 = ((3.0   - .25    ) * 4700 * 255) / ((19100 + 4700) * 1.1  )
+ *      121 = ((2.9   - .25    ) * 4700 * 255) / ((19100 + 4700) * 1.1  )
+ *
+ *      Well 125 and 121 were too close, so it shut off right after lowering to low mode, so I went with
+ *      130 and 120
+ *
+ *      To find out what value to use, plug in the target voltage (V) to this equation
+ *          value = (V * 4700 * 255) / (23800 * 1.1)
+ *
+ */
+
+
+
 #define F_CPU 4800000
 #include <avr/io.h>
 #include <stdlib.h>
 #include <util/delay.h>
 #include <avr/eeprom.h>
 #include <avr/pgmspace.h>
+#include <avr/sleep.h>
 
-#define MODE_MEMORY
+//#define MODE_MEMORY
 
 #ifdef MODE_MEMORY // only using eeprom if mode memory is enabled
 uint8_t EEMEM MODE_P;
@@ -77,6 +167,9 @@ volatile uint8_t noinit_strobe __attribute__ ((section (".noinit")));
 volatile uint8_t noinit_strobe_mode __attribute__ ((section (".noinit")));
 
 // PWM configuration
+// Set timer to do PWM for correct output pin and set prescaler timing
+//TCCR0A = 0x23; // phase corrected PWM is 0x21 for PB1, fast-PWM is 0x23
+//TCCR0B = 0x01; // pre-scaler for timer (1 => 1, 2 => 8, 3 => 64...)
 #define PWM_PIN PB1
 #define PWM_LVL OCR0B
 #define PWM_TCR 0x21
@@ -91,7 +184,7 @@ volatile uint8_t noinit_strobe_mode __attribute__ ((section (".noinit")));
  */
 
 // delay in ms between each ramp step
-#define RAMP_DELAY 30
+#define RAMP_DELAY 30 //30
 
 #define SINUSOID 4, 4, 5, 6, 8, 10, 13, 16, 20, 24, 28, 33, 39, 44, 50, 57, 63, 70, 77, 85, 92, 100, 108, 116, 124, 131, 139, 147, 155, 163, 171, 178, 185, 192, 199, 206, 212, 218, 223, 228, 233, 237, 241, 244, 247, 250, 252, 253, 254, 255
 // natural log of a sinusoid
@@ -105,7 +198,28 @@ volatile uint8_t noinit_strobe_mode __attribute__ ((section (".noinit")));
 
 // select which ramping profile to use.
 // store in program memory. It would use too much SRAM.
-uint8_t const ramp_LUT[] PROGMEM = { SIN_SQUARED };
+uint8_t const ramp_LUT[] PROGMEM = { SQUARED }; //SIN_SQUARED
+
+#define ADC_CHANNEL 0x01    // MUX 01 corresponds with PB2
+#define ADC_DIDR    ADC1D   // Digital input disable bit corresponding with PB2
+#define ADC_PRSCL   0x06    // clk/64
+#define ADC_42          185 // the ADC value we expect for 4.20 volts
+#define ADC_100         185 // the ADC value for 100% full (4.2V resting)
+#define ADC_75          175 // the ADC value for 75% full (4.0V resting)
+#define ADC_50          164 // the ADC value for 50% full (3.8V resting)
+#define ADC_25          154 // the ADC value for 25% full (3.6V resting)
+#define ADC_0           139 // the ADC value for 0% full (3.3V resting)
+#define ADC_LOW         123 // When do we start ramping down
+#define ADC_CRIT        113 // When do we shut the light off
+
+PROGMEM const uint8_t voltage_blinks[] = {
+    ADC_0,    // 1 blink  for 0%-25%
+    ADC_25,   // 2 blinks for 25%-50%
+    ADC_50,   // 3 blinks for 50%-75%
+    ADC_75,   // 4 blinks for 75%-100%
+    ADC_100,  // 5 blinks for >100%
+};
+
 
 
 /* Rise-Fall Ramping brightness selection /\/\/\/\
@@ -155,9 +269,9 @@ static void inline pwm_strobe()
 {
     while (1){
         PWM_LVL = 255;
-        _delay_ms(20);
+        _delay_ms(10);
         PWM_LVL = 0;
-        _delay_ms(90);
+        _delay_ms(1000);
     }
 }
 
@@ -173,17 +287,6 @@ static void inline strobe()
     }
 }
 
-// add beacon mode of 20ms on, 3000ms off
-static void inline beacon()
-{
-    while (1){
-        PORTB |= _BV(STROBE_PIN); // on
-        _delay_ms(20);
-        PORTB &= ~_BV(STROBE_PIN); // off
-        _delay_ms(3000);
-    }
-}
-
 static void inline sleep_ms(uint16_t ms)
 {
     while(ms >= 1){
@@ -195,7 +298,7 @@ static void inline sleep_ms(uint16_t ms)
 // Variable strobe
 // strobe using the STROBE_PIN. Note that PWM on that pin should not be
 // set up, or it should be disabled before calling this function.
-static void inline strobe2(uint8_t on, uint8_t off)
+static void inline strobe2(uint16_t on, uint16_t off)
 {
     while (1){
         PORTB |= _BV(STROBE_PIN); // on
@@ -204,6 +307,51 @@ static void inline strobe2(uint8_t on, uint8_t off)
         sleep_ms(off);
     }
 }
+
+inline void ADC_on() {
+    ADMUX  = (1 << REFS0) | (1 << ADLAR) | ADC_CHANNEL; // 1.1v reference, left-adjust, ADC1/PB2
+    DIDR0 |= (1 << ADC_DIDR);                           // disable digital input on ADC pin to reduce power consumption
+    ADCSRA = (1 << ADEN ) | (1 << ADSC ) | ADC_PRSCL;   // enable, start, prescale
+}
+
+uint8_t get_voltage() {
+    // Start conversion
+    ADCSRA |= (1 << ADSC);
+    // Wait for completion
+    while (ADCSRA & (1 << ADSC));
+    // See if voltage is lower than what we were looking for
+    return ADCH;
+}
+
+
+void battcheck()
+{
+    uint8_t voltage, i;
+    while (1){
+		uint8_t blinks = 0;
+		// turn off and wait one second before showing the value
+		// (also, ensure voltage is measured while not under load)
+		PWM_LVL = 0;
+		_delay_ms(1000);
+		voltage = get_voltage();
+		voltage = get_voltage(); // the first one is unreliable
+		// division takes too much flash space
+		//voltage = (voltage-ADC_LOW) / (((ADC_42 - 15) - ADC_LOW) >> 2);
+		// a table uses less space than 5 logic clauses
+		for (i=0; i<sizeof(voltage_blinks); i++)
+			if (voltage > pgm_read_byte(voltage_blinks + i)) blinks ++;
+		// blink up to five times to show voltage
+		// (~0%, ~25%, ~50%, ~75%, ~100%, >100%)
+		for(i=0; i<blinks; i++) {
+			PWM_LVL = 0x40;
+			_delay_ms(100);
+			PWM_LVL = 0;
+			_delay_ms(400);
+		}
+		//_delay_ms(1000);  // wait at least 1 second between readouts
+	}
+}
+
 
 int main(void)
 {
@@ -230,11 +378,11 @@ int main(void)
 
     // mode needs to loop back around
     // (or the mode is invalid)
-    if (noinit_mode > 5) // there are 6 modes
+    if (noinit_mode > 6) //there are 7 modes
     {
         noinit_mode = 0;
     }
-    
+
     if (noinit_short > 2 && !noinit_strobe)
     {
         noinit_strobe = 1;
@@ -255,7 +403,7 @@ int main(void)
     {
         switch(noinit_strobe_mode){
             case 0:
-            beacon();
+            strobe();
             break;
         }
     }
@@ -266,18 +414,28 @@ int main(void)
 
     PWM_LVL = 0;
 
+    uint8_t lowbatt_cnt = 0;
+    uint8_t voltage;
+    ADC_on();
+    ACSR   |=  (1<<7); //AC off
+
+    // keep track of the number of very short on times
+    // used to decide when to go into strobe mode
+    _delay_ms(25); // on for too long
+    noinit_short = 0; // reset short press counter
+
     switch(noinit_mode){
         case 0:
-        PWM_LVL = 0x04;
+        PWM_LVL = 0x05;//0xFF;
         break;
         case 1:
-        PWM_LVL = 0xE;
+        PWM_LVL = 0x10;//0x40;
         break;
         case 2:
-        PWM_LVL = 0x64;
+        PWM_LVL = 0x40;//0x10;
         break;
         case 3:
-        PWM_LVL = 0xFF;
+        PWM_LVL = 0xFF;//0x04;
         break;
         case 4:
         #ifdef MODE_MEMORY // remember mode in eeprom
@@ -285,17 +443,15 @@ int main(void)
 	    eeprom_busy_wait(); //make sure eeprom is ready
 	    eeprom_write_byte(&MODE_P, noinit_mode); // save mode
 	    #endif
-        ramp(); // ramping brightness selection
+		battcheck();
         break;
         case 5:
-        PWM_LVL = noinit_lvl; // use value selected by ramping function
+		pwm_strobe();// beacon actually //PWM_LVL = noinit_lvl; // use value selected by ramping function
+        break;
+        case 6:
+        ramp(); // ramping brightness selection (no more)
         break;
     }
-
-    // keep track of the number of very short on times
-    // used to decide when to go into strobe mode
-    _delay_ms(25); // on for too long
-    noinit_short = 0; // reset short press counter
     
     #ifdef MODE_MEMORY // remember mode in eeprom
     eeprom_busy_wait(); //make sure eeprom is ready
@@ -308,6 +464,25 @@ int main(void)
 	    eeprom_write_byte(&LVL_P, noinit_lvl); // save level
 	}
     #endif
-    while(1);
+
+    while(1){
+        if (ADCSRA & (1 << ADIF)) {  // if a voltage reading is ready
+            voltage = get_voltage();
+            // See if voltage is lower than what we were looking for
+            if (voltage < ADC_LOW) ++lowbatt_cnt;
+            else lowbatt_cnt = 0;
+            // See if it's been low for a while, and maybe step down
+            if (lowbatt_cnt == 4) PWM_LVL = 0x05;
+            if (lowbatt_cnt >= 8) {
+				PWM_LVL = 0; // Turn off the light
+				// Power down as many components as possible
+				set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+				sleep_mode();
+			}	
+            _delay_ms(1000);
+            // Make sure conversion is running for next time through
+            ADCSRA |= (1 << ADSC);
+        }
+	}
     return 0;
 }
